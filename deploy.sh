@@ -163,3 +163,78 @@ git config --global user.name "${GIT_USER_NAME}"
 echo "============================================================"
 echo "SUCCESS: Infrastructure Deployment Complete!"
 echo "============================================================"
+
+
+echo "============================================================"
+echo "Task 8: Install Config Sync (Fleet Feature)"
+echo "============================================================"
+#  UPDATE THIS VARIABLE WITH THE REPO URL FROM YOUR LAB INSTRUCTIONS 
+export GIT_SYNC_REPO="https://github.com/GoogleCloudPlatform/anthos-config-management-samples" 
+export GIT_SYNC_BRANCH="main"
+export AUTH_TYPE="none" # 'none' is used for public repos. Use 'gcpserviceaccount' for private Cloud Source Repos
+
+echo "--> Enabling Config Management feature on the Fleet..."
+gcloud beta container hub config-management enable --project=${PROJECT_ID}
+
+echo "--> Installing Config Sync (Defaults) on ${CLUSTER_1} and ${CLUSTER_2}..."
+# This mimics "leave all the fields with their default values"
+cat <<EOF > default-config-sync.yaml
+applySpecVersion: 1
+spec:
+  configSync:
+    enabled: true
+EOF
+
+gcloud beta container fleet config-management apply \
+    --membership=${CLUSTER_1} \
+    --config=default-config-sync.yaml \
+    --project=${PROJECT_ID}
+
+gcloud beta container fleet config-management apply \
+    --membership=${CLUSTER_2} \
+    --config=default-config-sync.yaml \
+    --project=${PROJECT_ID}
+
+echo "--> Waiting for Config Sync controllers to initialize (approx 2-3 minutes)..."
+# We must wait until the RootSync CRD is established in the clusters before deploying the package
+for CLUSTER in ${CLUSTER_1} ${CLUSTER_2}; do
+    gcloud container clusters get-credentials ${CLUSTER} --region ${REGION} --project ${PROJECT_ID}
+    
+    for NUM in {1..30}; do
+        kubectl get crd rootsyncs.configsync.gke.io >/dev/null 2>&1 && break
+        echo "    ...waiting for RootSync CRD on ${CLUSTER}..."
+        sleep 10
+    done
+    kubectl wait --for=condition=established crd rootsyncs.configsync.gke.io --timeout=5m
+done
+
+echo "============================================================"
+echo "Task 9: Deploy 'root-sync' Package (Cluster Scoped)"
+echo "============================================================"
+echo "--> Generating RootSync manifest..."
+cat <<EOF > root-sync-package.yaml
+apiVersion: configsync.gke.io/v1beta1
+kind: RootSync
+metadata:
+  name: root-sync
+  namespace: config-management-system
+spec:
+  sourceFormat: unstructured
+  git:
+    repo: "${GIT_SYNC_REPO}"
+    branch: "${GIT_SYNC_BRANCH}"
+    dir: "/"
+    auth: "${AUTH_TYPE}"
+EOF
+
+echo "--> Deploying package to ${CLUSTER_1}..."
+gcloud container clusters get-credentials ${CLUSTER_1} --region ${REGION} --project ${PROJECT_ID}
+kubectl apply -f root-sync-package.yaml
+
+echo "--> Deploying package to ${CLUSTER_2}..."
+gcloud container clusters get-credentials ${CLUSTER_2} --region ${REGION} --project ${PROJECT_ID}
+kubectl apply -f root-sync-package.yaml
+
+echo "============================================================"
+echo "SUCCESS: Config Sync Installed and Git Package Deployed!"
+echo "============================================================"
